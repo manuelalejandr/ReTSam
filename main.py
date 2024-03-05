@@ -19,6 +19,7 @@ import torch.nn.functional as F
 import pytorch_lightning as pl
 import lightning as L
 
+
 def set_seed(seed=42):
     '''Sets the seed of the entire notebook so results are the same every time we run.
     This is for REPRODUCIBILITY.'''
@@ -35,15 +36,15 @@ L.seed_everything(42)
 
 batch_size = 64
 
-transform = torchvision.transforms.Compose([
-    torchvision.transforms.RandomResizedCrop(32),
-    torchvision.transforms.RandomHorizontalFlip(),
-    torchvision.transforms.ToTensor(),
-    torchvision.transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
-])
+
+simclr_transform = SimCLRTransform(
+    input_size=128,
+    cj_strength=0.5,
+    gaussian_blur=0.0,
+)
 
 test_transform = torchvision.transforms.Compose([
-    torchvision.transforms.Resize((32, 32)),
+    torchvision.transforms.Resize((128, 128)),
     torchvision.transforms.ToTensor(),
     torchvision.transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
 ])
@@ -87,11 +88,20 @@ test_dataloader = torch.utils.data.DataLoader(
     shuffle=False
 )
 
+def compute_ordered_neighbors(z0, z1, n_neighbors):
+    # Calcula la matriz de distancias
+    distances = torch.cdist(z0, z1)
+
+    # Ordena los índices por distancia
+    _, indices = torch.sort(distances, dim=1)
+
+    return indices[:, :n_neighbors]
+
 class SimCLR(nn.Module):
     def __init__(self, backbone, batch, n_neg_neighbors, weight_decay=1e-1):
         super().__init__()
         self.backbone = backbone
-        self.projection_head = SimCLRProjectionHead(512, 512, 128)
+        self.projection_head = SimCLRProjectionHead(2048, 2048, 128)
         self.n_neg_neighbors = n_neg_neighbors
         self.batch = batch
         self.w = nn.Parameter(torch.ones(self.n_neg_neighbors-1, 1), requires_grad=True)
@@ -103,22 +113,14 @@ class SimCLR(nn.Module):
         z = self.projection_head(x)
         return z
 
-    def compute_negative_neighbors(self, z0, z1):
-        indices_n = compute_ordered_neighbors(z0, z1, self.n_neg_neighbors)
-        z_n = torch.mean(torch.mul(torch.stack([z1[i] for i in indices_n[:, 1:]]), self.w), dim=1)
-        return z_n
-
-    def regularization_loss(self):
-        return self.weight_decay * torch.norm(self.w, p=2)
-
-weights = torchvision.models.ResNet18_Weights.DEFAULT
-resnet = torchvision.models.resnet18(weights=weights)
+weights = torchvision.models.ResNet50_Weights.DEFAULT
+resnet = torchvision.models.resnet50(weights=weights)
 backbone = nn.Sequential(
     *list(resnet.children())[:-1],
     nn.AdaptiveAvgPool2d(1)
 )
 
-epochs = 4
+epochs = 200
 lr_factor = batch_size / batch_size
 
 criterion = NTXentLoss()
@@ -141,7 +143,7 @@ for epoch in range(epochs):
         z1 = model(x1)
 
         indices_n = compute_ordered_neighbors(z0, z1, 15)
-        z_n = compute_medoid(z1, indices_n)
+        z_n = z_n = torch.mean(torch.stack([z1[i] for i in indices_n[:,1:]]), dim=1)
 
         loss = triplet_loss(z0, z1, z_n) + (0.5) * criterion(z0, z1)
 
@@ -190,13 +192,44 @@ for i in range(10):
     ttest_1000.append(np.random.choice(torch.where(test_label==i)[0].cpu(), 100))
 test_1000 = np.concatenate(ttest_1000, 0)
 
+
+
 np.random.seed(2023)
 total = 1000
+
 y_preds = []
+
 maps = []
+
 
 knn_acc = 0
 for j in test_1000:
-    distances = cdist(np.array(test_embedding[j].cpu()).reshape((1, test_embedding.shape[1])), train_embedding.cpu(), metric="euclidean")
-    distances_dict = dict(zip(range(len(distances[0])), distances[0]))
-    list_dist_orders = dict(sorted(distances_dict.items(), key=lambda x
+
+  distances = cdist(np.array(test_embedding[j].cpu()).reshape((1, test_embedding.shape[1])), train_embedding.cpu(), metric="euclidean")
+
+  distances_dict = dict(zip(range(len(distances[0])), distances[0]))
+
+
+  list_dist_orders = dict(sorted(distances_dict.items(), key=lambda x: x[1], reverse=False))
+  dist_img = list(list_dist_orders.values())
+
+  index_img = list(list_dist_orders.keys())[:total]
+
+
+  truess = 0
+  sum = 0
+
+
+  for quant, i in enumerate(index_img):
+    if test_label[j]==train_label[i]:
+      truess += 1
+      sum += truess/(quant+1)
+  maps.append(sum/total)
+
+
+print("MAP at 1000 without binary:", np.sum(maps)/len(maps))
+
+
+
+
+        
